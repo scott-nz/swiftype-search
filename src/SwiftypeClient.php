@@ -18,14 +18,18 @@ use GuzzleHttp\Ring\Client\CurlHandler;
 use GuzzleHttp\Stream\Stream;
 use Marcz\Search\Client\DataWriter;
 use Marcz\Search\Client\DataSearcher;
-use Exception;
 use Object;
-use Config;
-use Director;
 use Versioned;
+use SiteConfig;
 
+/**
+ * Class SwiftypeClient
+ *
+ * @package Marcz\Swiftype
+ */
 class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, DataSearcher
 {
+
     protected $authToken;
     protected $clientIndexName;
     protected $clientAPI;
@@ -34,6 +38,13 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
 
     private static $batch_length = 100;
 
+    private $swiftypeEndPoint = 'http://api.swiftype.com/api/v1/';
+
+    /**
+     * Create and/or return a CurlHandler client
+     *
+     * @return mixed
+     */
     public function createClient()
     {
         if ($this->clientAPI) {
@@ -43,63 +54,146 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         return $this->setClientAPI(new CurlHandler());
     }
 
-    public function setClientAPI($handler)
+    /**
+     * Sets the client API handler
+     *
+     * @param $handler
+     *
+     * @return mixed
+     */
+    public function setClientAPI(CurlHandler $handler)
     {
         $this->clientAPI = $handler;
 
         return $this->clientAPI;
     }
 
+    /**
+     * Get the config details of the requested index
+     *
+     * Gets the default details for the index name as set in config.yml
+     * If FAQEngineName has been set in SiteConfig, this will override the name field in $indexConfig
+     *
+     * @param string $indexName name of the index that the configuration details have been requested for
+     *
+     * @return mixed
+     */
+    public function getIndexConfig($indexName)
+    {
+        $indexConfig = ArrayList::create(
+            SearchConfig::config()->get('indices')
+        )->find('name', $indexName);
+        $config = SiteConfig::current_site_config();
+        $engine = null;
+        if ($config->hasField('FAQEngineName')) {
+            $engine = $config->getField('FAQEngineName');
+        }
+        if ($engine) {
+            $indexConfig['name'] = $engine;
+        }
+        return $indexConfig;
+    }
+
+    /**
+     * Initialise index details that will be used in API requests
+     *
+     * @param string $indexName name of the index to be initialized
+     *
+     * @return array
+     */
     public function initIndex($indexName)
     {
         $this->createClient();
 
         $this->clientIndexName = $indexName;
 
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
+
         $this->rawQuery = [
-            'http_method'   => 'GET',
-            'uri'           => parse_url($endPoint, PHP_URL_PATH),
-            //'query_string' => ($query) ? $query . '&' . $token : $token,
-            'headers'       => [
-                'host'  => [parse_url($endPoint, PHP_URL_HOST)],
+            'scheme'      => 'https',
+            'http_method' => 'GET',
+            'uri'         => parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            'headers'     => [
+                'host'         => [parse_url($this->swiftypeEndPoint, PHP_URL_HOST)],
                 'Content-Type' => ['application/json'],
             ],
-            'client' => [
+            'client'      => [
                 'curl' => [
                     CURLOPT_SSL_VERIFYHOST => 0,
                     CURLOPT_SSL_VERIFYPEER => false
                 ]
             ]
-            // 'body' => $data
         ];
 
-        return $this->sql();
+        return $this->rawQuery;
     }
 
+    /**
+     * Initialise engine and retrieve ID of FAQ document type
+     *
+     * @param string $indexName
+     *
+     * @return string ID of FAQ document type
+     */
     public function createIndex($indexName)
     {
-        if (!$this->hasEngine($indexName)) {
-            $this->createEngine($indexName);
+        $indexConfig = $this->getIndexConfig($indexName);
+        $engine = $this->getEngine($indexConfig['name']);
+        if (!$engine) {
+            $engine = $this->createEngine($indexConfig['name']);
         }
 
-        $documentTypes = $this->getDocumentTypes($indexName);
 
-        return $documentTypes ?: $this->createDocumentType($indexName, $indexName);
+        $documentTypes = $this->getDocumentTypes($engine['id']);
+        $documentTypeId = null;
+
+        if ($documentTypes) {
+            echo 'Searching documentTypes for ' . strtolower($indexConfig['class']) . '<br>';
+            foreach ($documentTypes as $type) {
+                echo 'Document Type: ' . $type['name'];
+                if ($type['name'] === strtolower($indexConfig['class'])) {
+                    echo ' - Expected Document Type found <br>';
+                    $documentTypeId = $type['id'];
+                    break;
+                }
+                echo '<br>';
+            }
+        }
+        if($documentTypeId) {
+            echo    'Existing document type "' . $indexConfig['class'] . '" already exists in "' . $indexConfig['name'] . '" engine.<br>' .
+                'Deleting existing document type and all existing records from Swiftype.<br>';
+            $this->deleteDocumentType($indexConfig, $engine['id'], $documentTypeId);
+            /*
+             * Why is there a sleep() here?
+             * deleteDocumentType() makes a CURL request to Swiftype to delete the FAQ documentType.
+             * Our next step is to create a new Document Type with the same name.
+             * Without this wait the createDocumentType() CURL request may fire before Swiftype has completed the deletion process.
+             * Because of this, the Create request will return an error stating that a Document Type of the requested name already exists.
+             */
+            sleep(4);
+        }
+        echo 'Creating new document type "' . $indexConfig['class'] . '"<br>';
+        return $this->createDocumentType($indexConfig['class'], $indexConfig['name'], $engine['id']);
     }
 
-    public function hasEngine($indexName)
+    /**
+     * Execute API call to retrieve details of the Swiftype Engine that will be used
+     *
+     * @param string $indexName name of engine to be returned
+     *
+     * @return mixed
+     */
+    public function getEngine($indexName)
     {
         $url = sprintf(
             '%sengines.json',
-            parse_url($this->getEnv('SS_SWIFTYPE_END_POINT'), PHP_URL_PATH)
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH)
         );
 
-        $data = ['auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN')];
+        $data = ['auth_token' => $this->getSwiftypeAPIKey()];
 
         $rawQuery = $this->initIndex($indexName);
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($data);
 
         $this->rawQuery = $rawQuery;
 
@@ -109,25 +203,31 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         $response['body'] = $stream->getContents();
         $body = new ArrayList(json_decode($response['body'], true));
 
-        return (bool) $body->find('name', strtolower($indexName));
+        return $body->find('name', $indexName);
     }
 
-    public function getDocumentTypes($indexName)
+    /**
+     * Execute API call to retrieve the document types associated with the provided engine
+     *
+     * @param string $engineId ID of swiftype engine
+     *
+     * @return mixed
+     */
+    public function getDocumentTypes($engineId)
     {
         $url = sprintf(
-            '%sengines/%s/document_types.json',
-            parse_url($this->getEnv('SS_SWIFTYPE_END_POINT'), PHP_URL_PATH),
-            strtolower($indexName)
+            '%1$sengines/%2$s/document_types.json',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engineId
         );
 
-        $data = ['auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN')];
+        $data = ['auth_token' => $this->getSwiftypeAPIKey()];
 
-        $rawQuery = $this->initIndex($indexName);
+        $rawQuery = $this->initIndex($engineId);
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($data);
 
         $this->rawQuery = $rawQuery;
-
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
         $stream = Stream::factory($response['body']);
@@ -136,76 +236,68 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         return json_decode($response['body'], true);
     }
 
-    public function createEngine($indexName)
+    /**
+     * Execute API call to create a new Swiftype Engine
+     *
+     * @param string $engineName name of new engine that will be created
+     *
+     * @return array|null
+     */
+    public function createEngine($engineName)
     {
-        $rawQuery = $this->initIndex($indexName);
+        $rawQuery = $this->initIndex($engineName);
         $url = sprintf(
             '%sengines.json',
-            parse_url($this->getEnv('SS_SWIFTYPE_END_POINT'), PHP_URL_PATH)
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH)
         );
         $data = [
-            'auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN'),
-            'engine' => ['name' => strtolower($indexName)],
+            'auth_token' => $this->getSwiftypeAPIKey(),
+            'engine'     => ['name' => $engineName],
         ];
 
         $rawQuery['http_method'] = 'POST';
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($data);
 
         $this->rawQuery = $rawQuery;
 
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
 
-        return isset($response['status']) && 200 === $response['status'];
+        if (isset($response['status']) && 200 === $response['status']) {
+            $stream = Stream::factory($response['body']);
+            $response['body'] = $stream->getContents();
+            return json_decode($response['body'], true);
+        }
+
+        return null;
     }
 
-    public function createDocumentType($type, $indexName)
+    /**
+     * Execute API call to generate a new document type within the provided engine
+     *
+     * @param $typeName name of the document type that will be created
+     * @param $indexName name of the index that will be used generating API call
+     * @param $engineId ID of engine where new document type will be created
+     *
+     * @return bool
+     */
+    public function createDocumentType($typeName, $indexName, $engineId)
     {
         $rawQuery = $this->initIndex($indexName);
-
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
         $url = sprintf(
-            '%sengines/%s/document_types.json',
-            parse_url($endPoint, PHP_URL_PATH),
-            strtolower($indexName)
+            '%1$sengines/%2$s/document_types.json',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engineId
         );
         $data = [
-            'auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN'),
-            'document_type' => ['name' => strtolower($type)],
+            'auth_token'    => $this->getSwiftypeAPIKey(),
+            'document_type' => ['name' => strtolower($typeName)],
         ];
 
         $rawQuery['http_method'] = 'POST';
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
-
-        $this->rawQuery = $rawQuery;
-
-        $handler = $this->clientAPI;
-        $response = $handler($rawQuery);
-
-        return isset($response['status']) && 200 === $response['status'];
-    }
-
-    public function update($data)
-    {
-        $indexName = strtolower($this->clientIndexName);
-        $rawQuery = $this->initIndex($this->clientIndexName);
-
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
-        $url = sprintf(
-            '%1$sengines/%2$s/document_types/%2$s/documents/create_or_update.json',
-            parse_url($endPoint, PHP_URL_PATH),
-            $indexName
-        );
-        $data = [
-            'auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN'),
-            'document' => $data,
-        ];
-
-        $rawQuery['http_method'] = 'POST';
-        $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($data);
 
         $this->rawQuery = $rawQuery;
 
@@ -217,53 +309,164 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         return isset($response['status']) && 200 === $response['status'];
     }
 
-    public function bulkUpdate($list)
+    /**
+     * Execute API call to the existing FAQ document type within the provided engine
+     *
+     * @param $indexConfig Configuration details of FAQ Index
+     * @param $engineId ID of engine where new document type will be created
+     * @param $documentTypeId ID of the document type to be deleted
+     *
+     * @return bool
+     */
+    public function deleteDocumentType($indexConfig, $engineId, $documentTypeId)
     {
-        $indexName = strtolower($this->clientIndexName);
-        $rawQuery = $this->initIndex($this->clientIndexName);
-
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
+        $rawQuery = $this->initIndex($indexConfig['name']);
         $url = sprintf(
-            '%1$sengines/%2$s/document_types/%2$s/documents/bulk_create_or_update_verbose',
-            parse_url($endPoint, PHP_URL_PATH),
-            $indexName
+            '%1$sengines/%2$s/document_types/%3$s.json',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engineId,
+            $documentTypeId
         );
         $data = [
-            'auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN'),
-            'documents' => $list,
+            'auth_token'    => $this->getSwiftypeAPIKey(),
         ];
-
-        $rawQuery['http_method'] = 'POST';
-        $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
-
-        $this->rawQuery = $rawQuery;
-
-        $handler = $this->clientAPI;
-        $response = $handler($rawQuery);
-        $stream = Stream::factory($response['body']);
-        $response['body'] = $stream->getContents();
-
-        return isset($response['status']) && 200 === $response['status'];
-    }
-
-    public function deleteRecord($recordID)
-    {
-        $indexName = strtolower($this->clientIndexName);
-        $rawQuery = $this->initIndex($this->clientIndexName);
-
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
-        $url = sprintf(
-            '%1$sengines/%2$s/document_types/%2$s/documents/%3$s.json',
-            parse_url($endPoint, PHP_URL_PATH),
-            $indexName,
-            $recordID
-        );
-        $data = ['auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN')];
 
         $rawQuery['http_method'] = 'DELETE';
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($data);
+
+        $this->rawQuery = $rawQuery;
+
+        $handler = $this->clientAPI;
+        $response = $handler($rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
+        return isset($response['status']) && in_array($response['status'],[200,204]);
+    }
+
+    /**
+     * Execute API call to create/update a single record in the index
+     *
+     * @param array $data record details that will be sent to API
+     * @return bool
+     */
+    public function update($data)
+    {
+        $indexConfig = $this->getIndexConfig($this->clientIndexName);
+        $engine = $this->getEngine($indexConfig['name']);
+        $documentTypes = $this->getDocumentTypes($engine['id']);
+        $documentTypeId = null;
+        foreach ($documentTypes as $type) {
+            if ($type['name'] === strtolower($indexConfig['class'])) {
+                $documentTypeId = $type['id'];
+
+            }
+        }
+
+        $rawQuery = $this->initIndex($indexConfig['name']);
+
+        $url = sprintf(
+            '%1$sengines/%2$s/document_types/%3$s/documents/create_or_update.json',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engine['id'],
+            $documentTypeId
+        );
+        $data = [
+            'auth_token' => $this->getSwiftypeAPIKey(),
+            'document'   => $data,
+        ];
+
+        $rawQuery['http_method'] = 'POST';
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data);
+
+        $this->rawQuery = $rawQuery;
+
+        $handler = $this->clientAPI;
+        $response = $handler($rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
+
+        return isset($response['status']) && 200 === $response['status'];
+    }
+
+    /**
+     * Execute API call to update / create all records
+     *
+     * @param array $list array containing arrays of all records that will be updated
+     * @return bool
+     */
+    public function bulkUpdate($list)
+    {
+        $indexConfig = $this->getIndexConfig($this->clientIndexName);
+
+        $engine = $this->getEngine($indexConfig['name']);
+        $documentTypes = $this->getDocumentTypes($engine['id']);
+        $documentTypeId = null;
+        foreach ($documentTypes as $type) {
+            if ($type['name'] === strtolower($indexConfig['class'])) {
+                $documentTypeId = $type['id'];
+            }
+        }
+
+        $rawQuery = $this->initIndex($indexConfig['name']);
+
+        $url = sprintf(
+            '%1$sengines/%2$s/document_types/%3$s/documents/bulk_create_or_update_verbose',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engine['id'],
+            $documentTypeId
+        );
+        $data = [
+            'auth_token' => $this->getSwiftypeAPIKey(),
+            'documents'  => $list,
+        ];
+
+        $rawQuery['http_method'] = 'POST';
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data);
+
+        $this->rawQuery = $rawQuery;
+
+        $handler = $this->clientAPI;
+        $response = $handler($rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
+
+        return isset($response['status']) && 200 === $response['status'];
+    }
+
+    /**
+     * Execute API call to delete the requested record from the search index
+     *
+     * @param int $recordID ID of record to be deleted
+     * @return bool
+     */
+    public function deleteRecord($recordID)
+    {
+        $indexConfig = $this->getIndexConfig($this->clientIndexName);
+        $engine = $this->getEngine($indexConfig['name']);
+        $rawQuery = $this->initIndex($indexConfig['name']);
+        $documentTypes = $this->getDocumentTypes($engine['id']);
+        $documentTypeId = null;
+        foreach ($documentTypes as $type) {
+            if ($type['name'] === strtolower($indexConfig['class'])) {
+                $documentTypeId = $type['id'];
+            }
+        }
+
+        $url = sprintf(
+            '%1$sengines/%2$s/document_types/%3$s/documents/%4$s.json',
+            parse_url($this->swiftypeEndPoint, PHP_URL_PATH),
+            $engine['id'],
+            $documentTypeId,
+            $recordID
+        );
+        $data = ['auth_token' => $this->getSwiftypeAPIKey()];
+
+        $rawQuery['http_method'] = 'DELETE';
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data);
 
         $this->rawQuery = $rawQuery;
 
@@ -275,18 +478,23 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         return isset($response['status']) && in_array($response['status'], [204, 404]);
     }
 
+    /**
+     * Create a queued job that will execute a bulk export API call
+     *
+     * @param string $indexName name of the swiftype index that the records will be exported to
+     * @param string $className name of the Class for which all records will be exported
+     */
     public function createBulkExportJob($indexName, $className)
     {
-        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
-                        ->find('name', $indexName);
+        $indexConfig = $this->getIndexConfig($indexName);
         $exportClass = (empty($indexConfig['crawlBased'])) ? JsonBulkExport::class : CrawlBulkExport::class;
 
-        $list        = new DataList($className);
-        $total       = $list->count();
+        $list = new DataList($className);
+        $total = $list->count();
         $batchLength = self::config()->get('batch_length') ?: SearchConfig::config()->get('batch_length');
-        $totalPages  = ceil($total / $batchLength);
+        $totalPages = ceil($total / $batchLength);
 
-        $this->initIndex($indexName);
+        $this->initIndex($indexConfig['name']);
 
         for ($offset = 0; $offset < $totalPages; $offset++) {
             $job = Injector::inst()->createWithArgs(
@@ -298,13 +506,20 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         }
     }
 
+    /**
+     * Create a queued job to execute a single record update
+     *
+     * @param string $indexName name of the swiftype index that the record will be exported to
+     * @param string $className name of the Class for which the record will be exported from
+     * @param int $recordId ID of record to be updated
+     * @return null|void
+     */
     public function createExportJob($indexName, $className, $recordId)
     {
-        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
-                        ->find('name', $indexName);
+        $indexConfig = $this->getIndexConfig($indexName);
         $exportClass = (empty($indexConfig['crawlBased'])) ? JsonExport::class : CrawlExport::class;
 
-        $list   = new DataList($className);
+        $list = new DataList($className);
         $record = $list->byID($recordId);
 
         if (!$record) {
@@ -329,10 +544,15 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         singleton(QueuedJobService::class)->queueJob($job);
     }
 
+    /**
+     * Create a queued job to remove a record from the swiftype search index
+     * @param string $indexName name of the swiftype index that the record will be removed from
+     * @param string $className name of the deleted records Class
+     * @param int $recordId ID of record to be updated
+     */
     public function createDeleteJob($indexName, $className, $recordId)
     {
-        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
-            ->find('name', $indexName);
+        $indexConfig = $this->getIndexConfig($this->indexName);
         $exportClass = (empty($indexConfig['crawlBased'])) ? DeleteRecord::class : CrawlDeleteRecord::class;
 
         $job = Injector::inst()->createWithArgs(
@@ -343,166 +563,50 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         singleton(QueuedJobService::class)->queueJob($job);
     }
 
-    public function search($term = '', $filters = [], $pageNumber = 0, $pageLength = 20)
-    {
-        $term = trim($term);
-        $indexName = strtolower($this->clientIndexName);
-
-        $this->rawQuery = $this->initIndex($this->clientIndexName);
-
-        $endPoint = $this->getEnv('SS_SWIFTYPE_END_POINT');
-        $url = sprintf(
-            '%sengines/%s/search.json',
-            parse_url($endPoint, PHP_URL_PATH),
-            $indexName
-        );
-        $data = [
-            'auth_token' => $this->getEnv('SS_SWIFTYPE_AUTH_TOKEN'),
-            'q' => $term,
-            'document_types' => [$indexName],
-            'page' => $pageNumber ?: 1,
-            'per_page' => $pageLength,
-            'filters' => [$indexName => $this->translateFilterModifiers($filters)],
-            'facets' => [$indexName => []],
-        ];
-
-        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
-                        ->find('name', $this->clientIndexName);
-
-        if (!empty($indexConfig['attributesForFaceting'])) {
-            $data['facets'] = [$indexName => $indexConfig['attributesForFaceting']];
-        }
-
-        $this->rawQuery['uri'] = $url;
-        $this->rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
-
-        $handler = $this->clientAPI;
-        $response = $handler($this->rawQuery);
-        $stream = Stream::factory($response['body']);
-        $response['body'] = $stream->getContents();
-
-        $this->response = json_decode($response['body'], true);
-        $this->response['_total'] = $this->response['info'][$indexName]['total_result_count'];
-
-        $recordData = array_map(
-            [$this, 'mapToDataObject'],
-            $this->response['records'][$indexName]
-        );
-
-        return new ArrayList($recordData);
-    }
-
-    public function mapToDataObject($record)
-    {
-        return Injector::inst()->createWithArgs($record['ClassName'], [$record]);
-    }
-
+    /**
+     * Return the response variable
+     *
+     * @return mixed
+     */
     public function getResponse()
     {
         return $this->response;
     }
 
     /**
-     * Modifies filters
-     * @todo Refactor when unit tests is in place.
-     * @param array $filters
-     * @return array
+     * Get the API key from SiteConfig
+     *
+     * @return string|null
      */
-    public function translateFilterModifiers($filters = [])
+    public function getSwiftypeAPIKey()
     {
-        $query       = [];
-        $forFilters  = [];
-        $forFacets   = [];
-
-        foreach ($filters as $filterArray) {
-            foreach ($filterArray as $key => $value) {
-                $hasModifier = strpos($key, ':') !== false;
-                if ($hasModifier) {
-                    $forFilters[][$key] = $value;
-                } else {
-                    $forFacets[][$key] = $value;
-                }
-            }
+        $config = SiteConfig::current_site_config();
+        $ApiKey = null;
+        if ($config->hasField('FAQAPIKey')) {
+            $ApiKey = $config->getField('FAQAPIKey');
         }
 
-        if ($forFilters) {
-            $modifiedFilter   = [];
-
-            foreach ($forFilters as $filterArray) {
-                foreach ($filterArray as $key => $value) {
-                    $fieldArgs = explode(':', $key);
-                    $fieldName = array_shift($fieldArgs);
-                    $modifier  = array_shift($fieldArgs);
-                    if (is_array($value)) {
-                        $modifiedFilter = array_merge(
-                            $modifiedFilter,
-                            $this->modifyFilters($modifier, $fieldName, $value)
-                        );
-                    } else {
-                        $modifiedFilter[] = $this->modifyFilter($modifier, $fieldName, $value);
-                    }
-                }
-            }
-
-            foreach ($modifiedFilter as $filter) {
-                $column = key($filter);
-                $previous = isset($query[$column]) ? $query[$column] : [];
-                $query[$column] = array_merge($previous, current($filter));
-            }
-        }
-
-        if ($forFacets) {
-            foreach ($forFacets as $filterArray) {
-                foreach ($filterArray as $key => $value) {
-                    if (is_array($value)) {
-                        $query[$key] = array_values($value);
-                    } else {
-                        $query[$key] = $value;
-                    }
-                }
-            }
-        }
-
-        return $query;
+        return $ApiKey;
     }
 
-    public function callIndexMethod($methodName, $parameters = [])
-    {
-        return call_user_func_array([$this->clientIndex, $methodName], $parameters);
-    }
-
-    public function callClientMethod($methodName, $parameters = [])
-    {
-        return call_user_func_array([$this->clientAPI, $methodName], $parameters);
-    }
-
-    public function modifyFilter($modifier, $key, $value)
-    {
-        return Injector::inst()->create('Marcz\\Swiftype\\Modifiers\\' . $modifier)->apply($key, $value);
-    }
-
-    public function modifyFilters($modifier, $key, $values)
-    {
-        $modifiedFilter = [];
-
-        foreach ($values as $value) {
-            $modifiedFilter[] = $this->modifyFilter($modifier, $key, $value);
-        }
-
-        return $modifiedFilter;
-    }
-
+    /**
+     * Return the rawQuery variable
+     *
+     * @return mixed
+     */
     public function sql()
     {
         return $this->rawQuery;
     }
 
-    public function getEnv($name)
+    public function callIndexMethod($methodName, $parameters = [])
     {
-        if (Director::isDev() && Director::is_cli() && $name == 'SS_SWIFTYPE_AUTH_TOKEN') {
-            return 'SS_SWIFTYPE_AUTH_TOKEN';
-        }
-        // return Environment::getEnv($name);
-        return constant($name);
+        return call_user_func_array([$this->clientIndexName, $methodName], $parameters);
     }
+    public function callClientMethod($methodName, $parameters = [])
+    {
+        return call_user_func_array([$this->clientAPI, $methodName], $parameters);
+    }
+
+    public function search($term = '', $filters = [], $pageNumber = 0, $pageLength = 20) {}
 }

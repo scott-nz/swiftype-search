@@ -115,7 +115,6 @@ class JsonBulkExport extends AbstractQueuedJob implements QueuedJob
 
     public function writeToFile($filename, $data)
     {
-        //$file->setFromString(json_encode($this->bulkArray), $fileName);
         $file = fopen(BASE_PATH . '/' . $filename, "w");
         fwrite($file, $data);
         fclose($file);
