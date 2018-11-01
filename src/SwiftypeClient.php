@@ -352,6 +352,15 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
      */
     public function update($data)
     {
+        /*
+         * Swiftype wont partial search on enum fields.
+         * Changing the type to text here before submitting resolves this issue.
+         */
+        foreach($data['fields'] as $fieldKey => $field) {
+            if ($field['type'] === 'enum') {
+                $data['fields'][$fieldKey]['type'] = 'text';
+            }
+        }
         $indexConfig = $this->getIndexConfig($this->clientIndexName);
         $engine = $this->getEngine($indexConfig['name']);
         $documentTypes = $this->getDocumentTypes($engine['id']);
@@ -398,6 +407,17 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
      */
     public function bulkUpdate($list)
     {
+        /*
+         * Swiftype wont partial search on enum fields.
+         * Changing the type to text here before submitting resolves this issue.
+         */
+        foreach ($list as $listKey => $record) {
+            foreach ($record['fields'] as $fieldKey => $field) {
+                if ($field['type'] === 'enum') {
+                    $list[$listKey]['fields'][$fieldKey]['type'] = 'text';
+                }
+            }
+        }
         $indexConfig = $this->getIndexConfig($this->clientIndexName);
 
         $engine = $this->getEngine($indexConfig['name']);
