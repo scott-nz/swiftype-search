@@ -408,13 +408,14 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
     public function bulkUpdate($list)
     {
         /*
-         * Swiftype wont partial search on enum fields.
-         * Changing the type to text here before submitting resolves this issue.
+         * Swiftype doesn't partial search on enum fields.
+         * Some functionality including filtering does not work well with text fields.
+         * Changing the type to string here before submitting resolves these issues.
          */
         foreach ($list as $listKey => $record) {
             foreach ($record['fields'] as $fieldKey => $field) {
-                if ($field['type'] === 'enum') {
-                    $list[$listKey]['fields'][$fieldKey]['type'] = 'text';
+                if (in_array($field['type'], ['enum', 'text'])) {
+                    $list[$listKey]['fields'][$fieldKey]['type'] = 'string';
                 }
             }
         }
