@@ -357,8 +357,8 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
          * Changing the type to text here before submitting resolves this issue.
          */
         foreach($data['fields'] as $fieldKey => $field) {
-            if ($field['type'] === 'enum') {
-                $data['fields'][$fieldKey]['type'] = 'text';
+            if (in_array($field['type'], ['enum', 'text'])) {
+                $data['fields'][$fieldKey]['type'] = 'string';
             }
         }
         $indexConfig = $this->getIndexConfig($this->clientIndexName);
