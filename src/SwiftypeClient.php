@@ -200,6 +200,7 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
         $stream = Stream::factory($response['body']);
+        sleep(2);
         $response['body'] = $stream->getContents();
         $body = new ArrayList(json_decode($response['body'], true));
 
@@ -231,6 +232,7 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
         $stream = Stream::factory($response['body']);
+        sleep(2);
         $response['body'] = $stream->getContents();
 
         return json_decode($response['body'], true);
@@ -394,6 +396,7 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
         $stream = Stream::factory($response['body']);
+        sleep(2);
         $response['body'] = $stream->getContents();
 
         return isset($response['status']) && 200 === $response['status'];
@@ -494,6 +497,7 @@ class SwiftypeClient extends Object implements SearchClientAdaptor, DataWriter, 
         $handler = $this->clientAPI;
         $response = $handler($rawQuery);
         $stream = Stream::factory($response['body']);
+        sleep(2);
         $response['body'] = $stream->getContents();
 
         return isset($response['status']) && in_array($response['status'], [204, 404]);
