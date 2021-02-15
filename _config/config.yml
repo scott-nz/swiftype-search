@@ -1,7 +1,9 @@
 ---
 Name: swiftypesearch
-After: 'framework/*','cms/*','searchlist/*'
 ---
+SiteConfig:
+  extensions:
+    - SwiftypeSearchSiteConfig
 LeftAndMain:
   extensions:
     - Marcz\Swiftype\SwiftypeAdminExtension
@@ -12,6 +14,20 @@ Marcz\Search\Config:
       delete: true
       export: 'json'
       class: 'Marcz\Swiftype\SwiftypeClient'
+  indices:
+    - name: 'FAQ'
+      class: 'FAQ'
+      has_one: true
+      has_many: true
+      many_many: true
+      searchableAttributes:
+        - 'Question'
+        - 'Answer'
+        - 'Keywords'
+        - 'Category'
+      attributesForFaceting:
+        - 'Keywords'
+        - 'Category'
 Marcz\Search\Processor\Exporter:
   extensions:
     - Marcz\Swiftype\Extensions\Exporter
